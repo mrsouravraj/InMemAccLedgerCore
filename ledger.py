@@ -71,7 +71,10 @@ def _canon(x):
 
 
 def money(x, ccy):
-    """Quantize to the currency's own precision."""
+    """Quantize to the currency's own precision. Floats are refused: 2.675 is really 2.67499..., so a float
+    and the string "2.675" would post different amounts."""
+    if isinstance(x, float):
+        raise TypeError("money amounts must be str, int or Decimal, never float")
     return Decimal(x).quantize(Decimal(1).scaleb(-PRECISION[ccy]), rounding=ROUNDING)
 
 
@@ -173,6 +176,8 @@ class Ledger:
         ccy = self.accounts[acct]
         if name in AMOUNT_AT:
             raw = args[AMOUNT_AT[name]]
+            if isinstance(raw, float):
+                return f"amount {raw!r} is a float; pass a string or Decimal (binary floats cannot hold decimal money)"
             try:
                 a = Decimal(str(raw))
                 ok = a.is_finite() and a > 0 and money(a, ccy) > 0

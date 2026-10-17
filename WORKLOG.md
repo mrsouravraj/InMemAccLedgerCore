@@ -12,3 +12,4 @@ Real timestamps (local, +04), appended as work happens.
 - 2026-10-17 17:01  Final checks green (23 tests + 1 known failure). Pushing to origin/main.
 - 2026-10-17 17:13  Review fixes: amount/day/count validation, hold tested on processing day, window closes at capitalization (fees frozen), atomic end of day + id release on exception, identifiers exact. 32 green + 1 known failure.
 - 2026-10-17 17:15  Review fixes landed on main (9a1d405). Doc audit: README output guide, architecture cut table (no post-capitalization adjustment path) updated, PDF regenerated. Pushing.
+- 2026-10-17 17:18  Float amounts rejected (2.675 float posted 2.67 vs string 2.68): validator + money() guard, test, AMBIGUITIES 26, REJECTED 22.

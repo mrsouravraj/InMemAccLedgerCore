@@ -85,3 +85,6 @@ Capitalization is the end of the window for that account. A `CAPITALIZATION` eve
 
 **25. Is a failed end of day all-or-nothing?**
 Resolved: yes. Before posting anything, end of day checks that no account whose currency has no fee tariff is overdrawn, and raises first if one is. A BHD overdraft therefore cannot leave AED fees half-posted.
+
+**26. Binary floats as amounts.**
+The spec shows amounts as decimal text. Resolved: floats are rejected as input and `money()` raises on one. A float cannot represent most decimal amounts: `2.675` is stored as 2.67499…, so it posted AED 2.67 while the string `"2.675"` posted 2.68 (found on review; the validator read the text, the poster read the binary value). Amounts must be `str`, `int` or `Decimal`. HALF_UP then gives 2.68 for the string, which is the figure a customer reading "2.675" expects.

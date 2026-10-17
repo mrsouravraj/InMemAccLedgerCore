@@ -3,7 +3,7 @@ from unittest import mock
 from dataclasses import FrozenInstanceError
 from decimal import Decimal as D
 
-from ledger import Ledger, WINDOW
+from ledger import Ledger, WINDOW, money
 from replay import run, ACCOUNTS, A1, A2
 
 
@@ -185,6 +185,18 @@ class Hardening(unittest.TestCase):
         self.assertEqual((len(lg.journal), lg.balance(A1, 1), lg.available(A1, 1)), (0, D("0.00"), D("0.00")))
         self.assertEqual(lg.authorize("ok", A1, "Hneg", "-100", 1, 1), "REJECTED")   # negative hold must not create funds
         self.assertEqual(lg.authorize("ok2", A1, "Hpos", "1.00", 1, 1), "DECLINED")  # so a positive hold still has no funds
+
+    def test_float_amounts_are_rejected_not_silently_misrounded(self):
+        lg = Ledger(ACCOUNTS)   # 2.675 as a float is 2.67499..., as a string it is 2.675 -> 2.68 under HALF_UP
+        for cmd in (lg.credit, lg.debit):
+            self.assertEqual(cmd(f"f{cmd.__name__}", A1, 2.675, 1, 1), "REJECTED")
+        self.assertEqual(lg.authorize("fa", A1, "H", 2.675, 1, 1), "REJECTED")
+        self.assertEqual(lg.credit_instalments("fi", A2, 10.0, 3, 1, 1), "REJECTED")
+        self.assertEqual(len(lg.journal), 0)
+        self.assertEqual(lg.credit("s", A1, "2.675", 1, 1), "ACCEPTED")
+        self.assertEqual(lg.balance(A1, 1), D("2.68"))
+        with self.assertRaises(TypeError):
+            money(2.675, "AED")
 
     def test_days_and_counts_are_bounded(self):
         lg = Ledger(ACCOUNTS)
