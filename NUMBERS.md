@@ -31,4 +31,6 @@ Every constant in the code, where it lives, and why that value and not half of i
 | Fee currency | AED only; BHD overdraft raises `ValueError` | The spec gives no BHD fee. Converting 25 AED at a guessed FX rate, or silently using 25.000 BHD (~USD 66), would be an invented number. ACC-002 never goes negative here. |
 | Hold amount released at settlement | the whole hold, not just the settled amount | See AMBIGUITIES #11. Auth-A: hold 200.00, settles 185.00, 15.00 is released with it. |
 | Future value dates | rejected (value_date > processing day) | Not in the stream and not defined by the spec; rejecting avoids inventing forward-balance semantics. |
+| Smallest accepted amount | 0.01 AED / 0.001 BHD (one minor unit) | Anything that rounds to zero is rejected, so it can't be stored as a 0.00 posting. Amounts must also be finite and positive. |
+| Valid days | whole numbers 1..6 | The window is the spec's; day 0 or day 7 has no meaning in it. |
 | Journal ids | `J1, J2, …` in append order | Gives every figure a handle for the live walk-through. |

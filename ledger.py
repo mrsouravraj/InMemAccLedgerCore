@@ -18,33 +18,56 @@ WINDOW = 6                                 # Day 1 .. Day 6
 MEMO = {"HOLD", "HOLD_RELEASE"}            # affect available balance, not ledger balance
 
 
+# Positions (after the event id) of the amount field and count field of each input command.
+# Arguments are (acct, ..., value_day, processing_day).
+AMOUNT_AT = {"credit": 1, "debit": 1, "credit_instalments": 1, "authorize": 2, "settle": 2}
+COUNT_AT = {"credit_instalments": 2}
+
+
+def _is_day(x):
+    return isinstance(x, int) and not isinstance(x, bool) and 1 <= x <= WINDOW
+
+
+def command(fn):
+    """Input-command guard.
+    1. Event id: consumed on first receipt, whatever the outcome. Same id + same payload = redelivery, logged
+       DUPLICATE, no effect. Same id + different payload: REJECTED. The processing day is not part of the payload.
+       Amounts compare numerically ("100.0" == "100.00"); identifiers compare exactly ("01" != "1").
+    2. Validation (`_invalid`) runs before anything is posted; a failure is a logged REJECTED event, not an exception.
+    3. If the command itself raises, the id is released: no outcome was recorded, so a corrected retry is legal."""
+    name = fn.__name__
+
+    def wrapper(self, ev, *args):
+        if not isinstance(ev, str) or not ev.strip():
+            raise ValueError("event id must be a non-empty string")
+        acct, day = args[0], args[-1]
+        if acct not in self.accounts:
+            raise KeyError(acct)
+        kind = name.upper()
+        payload = (name, tuple(_canon(a) if i == AMOUNT_AT.get(name) else str(a) for i, a in enumerate(args[:-1])))
+        seen = self._received.get(ev)
+        if seen is not None:
+            if seen == payload:
+                return self._log(ev, kind, acct, day, "DUPLICATE", "redelivery of an event id already received; ignored")
+            return self._log(ev, kind, acct, day, "REJECTED", f"event id already used for a different payload ({seen[0]})")
+        self._received[ev] = payload
+        try:
+            if why := self._invalid(name, acct, args):
+                return self._log(ev, kind, acct, day, "REJECTED", why, str(args[1]) if name in ("authorize", "settle") else "")
+            return fn(self, ev, *args)
+        except Exception:
+            del self._received[ev]
+            raise
+    wrapper.__name__, wrapper.__doc__ = name, fn.__doc__
+    return wrapper
+
+
 def _canon(x):
-    """Canonical text of a payload field, so "100.0" and "100.00" compare equal."""
+    """Canonical text of an amount, so "100.0" and "100.00" compare equal."""
     try:
         return str(Decimal(str(x)).normalize())
     except InvalidOperation:
         return str(x)
-
-
-def command(fn):
-    """Event-id check for every input command. An id is consumed on first receipt, whatever the outcome.
-    Same id + same payload = redelivery: logged DUPLICATE, no effect. Same id + different payload: REJECTED.
-    The processing day (last argument) is not part of the payload, so a redelivery on a later day is still a duplicate."""
-    def wrapper(self, ev, *args):
-        if not isinstance(ev, str) or not ev.strip():
-            raise ValueError("event id must be a non-empty string")
-        payload = (fn.__name__, tuple(_canon(a) for a in args[:-1]))
-        kind, acct, day = fn.__name__.upper(), args[0], args[-1]
-        seen = self._received.get(ev)
-        if seen is None:
-            self._received[ev] = payload
-            return fn(self, ev, *args)
-        if seen == payload:
-            return self._log(ev, kind, acct, day, "DUPLICATE", "redelivery of an event id already received; ignored")
-        return self._log(ev, kind, acct, day, "REJECTED", f"event id already used for a different payload ({seen[0]})")
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__ = fn.__doc__
-    return wrapper
 
 
 def money(x, ccy):
@@ -138,11 +161,34 @@ class Ledger:
         """Audit note: event declared on a closed day, processed on `day`. Closed days are never reopened."""
         return self._log(ev, "LATE_ARRIVAL", acct, day, "ACCEPTED", f"declared Day {declared}, processed Day {day}")
 
-    def _future(self, ev, kind, acct, vd, day, ref=""):
-        """Future-dated value is out of scope: returns the REJECTED outcome, or None if vd is acceptable."""
-        if vd > day:
-            return self._log(ev, kind, acct, day, "REJECTED", f"value_date Day {vd} is after processing Day {day}", ref)
+    def _invalid(self, name, acct, args):
+        """Reason an input must be REJECTED, or None. Pure check: posts nothing."""
+        vd, day = args[-2], args[-1]
+        if not (_is_day(vd) and _is_day(day)):
+            return f"value_date {vd!r} / processing day {day!r} must be whole days in 1..{WINDOW}"
+        if vd > day:   # future-dated value is out of scope
+            return f"value_date Day {vd} is after processing Day {day}"
+        if self._finalized(acct):
+            return "interest already capitalized: the window for this account is closed"
+        ccy = self.accounts[acct]
+        if name in AMOUNT_AT:
+            raw = args[AMOUNT_AT[name]]
+            try:
+                a = Decimal(str(raw))
+                ok = a.is_finite() and a > 0 and money(a, ccy) > 0
+            except InvalidOperation:
+                ok = False
+            if not ok:
+                return f"amount {raw!r} must be a finite positive number of at least one {PRECISION[ccy]}-dp unit"
+        if name in COUNT_AT:
+            n = args[COUNT_AT[name]]
+            if not (isinstance(n, int) and not isinstance(n, bool) and n >= 1):
+                return f"count {n!r} must be a whole number >= 1"
         return None
+
+    def _finalized(self, acct):
+        """True once interest is capitalized: the window for this account is closed to further input."""
+        return any(e.kind == "CAPITALIZATION" and e.account == acct for e in self._events)
 
     @command
     def credit(self, ev, acct, amount, vd, day):
@@ -153,16 +199,12 @@ class Ledger:
         return self._simple(ev, "DEBIT", acct, -money(amount, self.accounts[acct]), vd, day)
 
     def _simple(self, ev, kind, acct, signed, vd, day):
-        if bad := self._future(ev, kind, acct, vd, day):
-            return bad
         self._post(ev, acct, kind, signed, vd, day)
         return self._log(ev, kind, acct, day, "ACCEPTED", f"{signed}")
 
     @command
     def credit_instalments(self, ev, acct, total, n, vd, day):
         """Equal split rounded down; the residual goes on the last instalment."""
-        if bad := self._future(ev, "CREDIT_INSTALMENTS", acct, vd, day):
-            return bad
         ccy = self.accounts[acct]
         total = money(total, ccy)
         base = (total / n).quantize(Decimal(1).scaleb(-PRECISION[ccy]), rounding=ROUND_DOWN)
@@ -175,11 +217,9 @@ class Ledger:
     def authorize(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
         detail = f"{auth_id} hold {amount}"
-        if bad := self._future(ev, "AUTHORIZATION", acct, vd, day, auth_id):
-            return bad
         if self.auth_state(auth_id) != "UNKNOWN":
             return self._log(ev, "AUTHORIZATION", acct, day, "REJECTED", f"{auth_id} duplicate id", auth_id)
-        after = self.available(acct, vd) - amount
+        after = self.available(acct, day) - amount   # processing day: a back-dated hold cannot spend money already gone
         if after < 0:   # approved only if available stays >= 0 after the hold
             return self._log(ev, "AUTHORIZATION", acct, day, "DECLINED",
                              f"{detail}; available after hold would be {after}", auth_id)
@@ -190,8 +230,6 @@ class Ledger:
     @command
     def settle(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
-        if bad := self._future(ev, "SETTLEMENT", acct, vd, day, auth_id):
-            return bad
         hold = next((e for e in self._journal if e.kind == "HOLD" and e.ref == auth_id and e.account == acct), None)
         if hold is None:
             # no hold behind it: nothing is debited; the event sits in the exception list
@@ -208,8 +246,6 @@ class Ledger:
     @command
     def reverse(self, ev, acct, target_ev, vd, day):
         """Compensating entry for CREDIT/DEBIT entries posted by `target_ev`. Original is untouched."""
-        if bad := self._future(ev, "REVERSAL", acct, vd, day):
-            return bad
         targets = [e for e in self._journal if e.event == target_ev and e.account == acct
                    and e.kind in ("CREDIT", "DEBIT")]
         done = {e.ref for e in self._journal if e.kind == "REVERSAL"}
@@ -227,15 +263,21 @@ class Ledger:
 
     def end_of_day(self, day):
         """Re-evaluate overdraft fees for every day <= `day`, ascending (earlier fees feed later bases).
-        Back-valued entries can create fees on closed days; their correction reverses them."""
+        Back-valued entries can create fees on closed days; their correction reverses them.
+        All-or-nothing: a currency with no fee tariff that is overdrawn raises before anything is posted.
+        Finalized (capitalized) accounts are skipped: their fees are frozen with the interest."""
+        if not _is_day(day):
+            raise ValueError(f"day must be a whole number in 1..{WINDOW}")
+        live = {a: c for a, c in self.accounts.items() if not self._finalized(a)}
+        for acct, ccy in live.items():   # preflight; a currency without a tariff never carries fees, so its base is exact
+            if ccy not in OVERDRAFT_FEE and any(self._fee_base(acct, d) < 0 for d in range(1, day + 1)):
+                raise ValueError(f"no overdraft fee defined for {ccy}")
         new = []
-        for acct, ccy in self.accounts.items():
+        for acct, ccy in live.items():
             for d in range(1, day + 1):
                 negative = self._fee_base(acct, d) < 0
                 if negative == self.fee_active(acct, d):
                     continue
-                if negative and ccy not in OVERDRAFT_FEE:
-                    raise ValueError(f"no overdraft fee defined for {ccy}")
                 fee = OVERDRAFT_FEE[ccy]
                 new.append(self._post(f"EOD{day}", acct, "FEE" if negative else "FEE_REVERSAL",
                                       -fee if negative else fee, d, day, ref=f"day{d}"))
@@ -251,8 +293,12 @@ class Ledger:
         return out
 
     def capitalize_interest(self, acct, day=WINDOW):
-        """One credit, value_date = `day`, equal to the sum of the rounded daily accruals."""
-        if any(e.kind == "INTEREST" and e.account == acct for e in self._journal):
+        """One credit, value_date = `day`, equal to the sum of the rounded daily accruals. Closes the account's
+        window: later inputs are rejected, so the accruals can never drift from what was capitalized.
+        The CAPITALIZATION event is logged even when the total is zero, so finalization is always on record."""
+        if self._finalized(acct):
             return None
         total = sum((a for _, a in self.accruals(acct, day).values()), Decimal(0))
-        return self._post(f"EOD{day}", acct, "INTEREST", total, day, day) if total else None
+        entry = self._post(f"EOD{day}", acct, "INTEREST", total, day, day) if total else None
+        self._log(f"EOD{day}", "CAPITALIZATION", acct, day, "ACCEPTED", f"capitalized {money(total, self.accounts[acct])}")
+        return entry

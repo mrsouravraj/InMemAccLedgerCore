@@ -52,7 +52,7 @@ In the model as built, an authorization is `DECLINED` on arrival, `APPROVED` (a 
 | Simplification | Production risk deferred |
 |---|---|
 | Single-sided ledger (customer sub-ledger, no double entry, no general ledger) | No trial balance or control total; customer balances cannot be proven against the GL. Unbalanced postings go unnoticed. |
-| Event-id check is in-memory only, with no ordering guarantee on input | Redeliveries are ignored only within one process run; after a restart or across channels the same message can post twice. Ids need to be durable and unique per source. |
+| Input validation is minimal (positive finite amounts, days 1–6); event-id check is in-memory only, with no ordering guarantee on input | Redeliveries are ignored only within one process run; after a restart or across channels the same message can post twice. Ids need to be durable and unique per source. |
 | No persistence, crash recovery or concurrency control | Lost state on restart. Two writers would race on balance checks (authorize-then-debit). |
 | O(N) reads, no indexes (Section 1) | Nightly close misses its window at volume. |
 | "Day" is an integer; no business calendar or time zone | Weekends, holidays and cut-off times, and so which value dates are valid, are not modelled. |

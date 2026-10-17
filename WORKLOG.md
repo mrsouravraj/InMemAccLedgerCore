@@ -10,3 +10,4 @@ Real timestamps (local, +04), appended as work happens.
 - 2026-10-17 16:31  Self-review fixes: read-only history views, structured Event.ref, future-date guard on all commands, declined-auth settlement message, generated docs/arch.html untracked. 19 green + 1 known failure.
 - 2026-10-17 16:38  Added event-id validation (@command: DUPLICATE for same payload, REJECTED for conflicting payload); 4 new tests; docs + PDF updated.
 - 2026-10-17 17:01  Final checks green (23 tests + 1 known failure). Pushing to origin/main.
+- 2026-10-17 17:13  Review fixes: amount/day/count validation, hold tested on processing day, window closes at capitalization (fees frozen), atomic end of day + id release on exception, identifiers exact. 32 green + 1 known failure.

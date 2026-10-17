@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 from dataclasses import FrozenInstanceError
 from decimal import Decimal as D
 
@@ -162,6 +163,86 @@ class Rules(unittest.TestCase):
             self.assertEqual(lg.accruals(acct, 1)[1][1], D(0))
             lg = Ledger(ACCOUNTS); lg.credit("E1", acct, at, 1, 1)
             self.assertEqual(lg.accruals(acct, 1)[1][1], D(got))
+
+
+class Hardening(unittest.TestCase):
+    """Gaps found in review of the first push: each test reproduces one."""
+
+    def test_backdated_hold_cannot_spend_money_already_gone(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("a", A1, "100.00", 1, 1); lg.debit("b", A1, "100.00", 2, 2)
+        self.assertEqual(lg.authorize("c", A1, "X", "50.00", 1, 3), "DECLINED")   # value Day 1, but 0.00 is left on Day 3
+        self.assertEqual(lg.active_holds(A1), D("0.00"))
+
+    def test_invalid_amounts_are_rejected_and_change_nothing(self):
+        lg = Ledger(ACCOUNTS)
+        bad = ("-100", "0", "NaN", "Infinity", "abc", "0.004", "1e40", None)   # 0.004 AED rounds to 0.00
+        for i, amt in enumerate(bad):
+            for cmd in (lg.credit, lg.debit):
+                self.assertEqual(cmd(f"c{i}{cmd.__name__}", A1, amt, 1, 1), "REJECTED", (cmd.__name__, amt))
+            self.assertEqual(lg.authorize(f"a{i}", A1, f"H{i}", amt, 1, 1), "REJECTED", amt)
+            self.assertEqual(lg.settle(f"s{i}", A1, "H", amt, 1, 1), "REJECTED", amt)
+        self.assertEqual((len(lg.journal), lg.balance(A1, 1), lg.available(A1, 1)), (0, D("0.00"), D("0.00")))
+        self.assertEqual(lg.authorize("ok", A1, "Hneg", "-100", 1, 1), "REJECTED")   # negative hold must not create funds
+        self.assertEqual(lg.authorize("ok2", A1, "Hpos", "1.00", 1, 1), "DECLINED")  # so a positive hold still has no funds
+
+    def test_days_and_counts_are_bounded(self):
+        lg = Ledger(ACCOUNTS)
+        self.assertEqual(lg.credit("a", A1, "1.00", 0, 1), "REJECTED")     # value day 0
+        self.assertEqual(lg.credit("b", A1, "1.00", 1, 7), "REJECTED")     # beyond the window
+        self.assertEqual(lg.credit("c", A1, "1.00", "1", 1), "REJECTED")   # not a whole number
+        self.assertEqual(lg.credit_instalments("d", A2, "3.000", 0, 1, 1), "REJECTED")
+        self.assertEqual(lg.credit_instalments("e", A2, "3.000", True, 1, 1), "REJECTED")
+        self.assertEqual(len(lg.journal), 0)
+
+    def test_capitalization_closes_the_window(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("a", A1, "100.00", 1, 1)
+        self.assertIsNotNone(lg.capitalize_interest(A1, 6))
+        self.assertEqual(lg.credit("b", A1, "100.00", 1, 6), "REJECTED")   # would have made accruals 0.48 vs 0.24 capitalized
+        self.assertIsNone(lg.capitalize_interest(A1, 6))
+        total = sum((a for _, a in lg.accruals(A1).values()), D(0))
+        self.assertEqual(total, sum((e.amount for e in lg.journal if e.kind == "INTEREST"), D(0)))
+        self.assertEqual(lg.end_of_day(6), [])   # fees are frozen with the interest
+
+    def test_zero_interest_still_finalizes(self):
+        lg = Ledger(ACCOUNTS)
+        self.assertIsNone(lg.capitalize_interest(A2, 6))
+        self.assertEqual(lg.credit("a", A2, "5.000", 1, 6), "REJECTED")
+
+    def test_fee_reinstated_when_a_day_goes_negative_again(self):
+        # Policy (AMBIGUITIES #19): at most one ACTIVE fee per day. A day that turns negative again after a refund is a new shortfall.
+        lg = Ledger(ACCOUNTS)
+        lg.debit("a", A1, "10.00", 1, 1); lg.end_of_day(1)
+        lg.credit("b", A1, "10.00", 1, 2); lg.end_of_day(2)
+        lg.debit("c", A1, "10.00", 1, 3); lg.end_of_day(3)
+        self.assertEqual([(e.kind, e.value_day) for e in lg.journal if e.kind.startswith("FEE") and e.value_day == 1],
+                         [("FEE", 1), ("FEE_REVERSAL", 1), ("FEE", 1)])   # Days 2 and 3 cascade separately
+        self.assertTrue(lg.fee_active(A1, 1))
+
+    def test_identifiers_compare_exactly_but_amounts_numerically(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("z", A1, "500.00", 1, 1)
+        self.assertEqual(lg.authorize("e", A1, "01", "1.00", 1, 1), "ACCEPTED")
+        self.assertEqual(lg.authorize("e", A1, "1", "1.00", 1, 1), "REJECTED")      # different id string: conflict
+        self.assertEqual(lg.authorize("e", A1, "01", "1.0", 1, 1), "DUPLICATE")     # same id, same amount
+        self.assertEqual(lg.authorize("e2", A1, "1", "1.00", 1, 1), "ACCEPTED")     # "1" really is a different auth
+
+    def test_end_of_day_is_all_or_nothing(self):
+        lg = Ledger(ACCOUNTS)
+        lg.debit("a", A1, "10.00", 1, 1); lg.debit("b", A2, "1.000", 1, 1)
+        with self.assertRaises(ValueError):
+            lg.end_of_day(1)
+        self.assertEqual([e for e in lg.journal if e.kind == "FEE"], [])   # no AED fee left behind
+
+    def test_failed_command_releases_its_event_id(self):
+        lg = Ledger(ACCOUNTS)
+        with mock.patch.object(lg, "_post", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                lg.credit("a", A1, "1.00", 1, 1)
+        self.assertEqual(lg.credit("a", A1, "1.00", 1, 1), "ACCEPTED")   # not DUPLICATE, not consumed
+        self.assertEqual(lg.credit("bad", A1, "abc", 1, 1), "REJECTED")  # a logged rejection DOES consume its id
+        self.assertEqual(lg.events[-1].outcome, "REJECTED")
 
 
 if __name__ == "__main__":
