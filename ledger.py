@@ -68,13 +68,13 @@ class Ledger:
     # ---- derived state ----------------------------------------------------
     def balance(self, acct, day, skip=lambda e: False):
         """Ledger balance: all non-memo entries with value_date <= day."""
-        return sum((e.amount for e in self.journal
-                    if e.account == acct and e.kind not in MEMO
-                    and e.value_day <= day and not skip(e)), Decimal(0))
+        return money(sum((e.amount for e in self.journal
+                          if e.account == acct and e.kind not in MEMO
+                          and e.value_day <= day and not skip(e)), Decimal(0)), self.accounts[acct])
 
     def active_holds(self, acct):
-        return sum((e.amount if e.kind == "HOLD" else -e.amount for e in self.journal
-                    if e.account == acct and e.kind in MEMO), Decimal(0))
+        return money(sum((e.amount if e.kind == "HOLD" else -e.amount for e in self.journal
+                          if e.account == acct and e.kind in MEMO), Decimal(0)), self.accounts[acct])
 
     def available(self, acct, day):
         return self.balance(acct, day) - self.active_holds(acct)
