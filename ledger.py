@@ -46,50 +46,61 @@ class Event:
     day: int          # processing day
     outcome: str      # ACCEPTED | REJECTED | DECLINED
     detail: str = ""
+    ref: str = ""     # auth id for AUTHORIZATION/SETTLEMENT events
 
 
 class Ledger:
     def __init__(self, accounts):
         self.accounts = dict(accounts)   # id -> currency; opening balances are all zero
-        self.events: list[Event] = []
-        self.journal: list[Entry] = []
+        self._events: list[Event] = []
+        self._journal: list[Entry] = []
+
+    # Read-only views: callers get a tuple snapshot, so nothing outside can remove or reorder history.
+    # ponytail: O(n) copy per access; fine here, expose an iterator/slice view if it ever shows up in a profile.
+    @property
+    def events(self):
+        return tuple(self._events)
+
+    @property
+    def journal(self):
+        return tuple(self._journal)
 
     # ---- append-only primitives -------------------------------------------
     def _post(self, ev, acct, kind, amount, vd, day, ref=""):
-        e = Entry(f"J{len(self.journal) + 1}", ev, acct, kind,
+        e = Entry(f"J{len(self._journal) + 1}", ev, acct, kind,
                   money(amount, self.accounts[acct]), vd, day, ref)
-        self.journal.append(e)
+        self._journal.append(e)
         return e
 
-    def _log(self, ev, kind, acct, day, outcome, detail=""):
-        self.events.append(Event(len(self.events) + 1, ev, kind, acct, day, outcome, detail))
+    def _log(self, ev, kind, acct, day, outcome, detail="", ref=""):
+        self._events.append(Event(len(self._events) + 1, ev, kind, acct, day, outcome, detail, ref))
         return outcome
 
     # ---- derived state ----------------------------------------------------
     def balance(self, acct, day, skip=lambda e: False):
         """Ledger balance: all non-memo entries with value_date <= day."""
-        return money(sum((e.amount for e in self.journal
+        return money(sum((e.amount for e in self._journal
                           if e.account == acct and e.kind not in MEMO
                           and e.value_day <= day and not skip(e)), Decimal(0)), self.accounts[acct])
 
     def active_holds(self, acct):
-        return money(sum((e.amount if e.kind == "HOLD" else -e.amount for e in self.journal
+        return money(sum((e.amount if e.kind == "HOLD" else -e.amount for e in self._journal
                           if e.account == acct and e.kind in MEMO), Decimal(0)), self.accounts[acct])
 
     def available(self, acct, day):
         return self.balance(acct, day) - self.active_holds(acct)
 
     def auth_state(self, auth_id):
-        if any(e.kind == "AUTHORIZATION" and e.detail.startswith(auth_id + " ") and e.outcome == "DECLINED"
-               for e in self.events):
+        if any(e.kind == "AUTHORIZATION" and e.ref == auth_id and e.outcome == "DECLINED"
+               for e in self._events):
             return "DECLINED"
-        refs = {e.kind for e in self.journal if e.ref == auth_id}
+        refs = {e.kind for e in self._journal if e.ref == auth_id}
         if "SETTLEMENT" in refs:
             return "SETTLED"
         return "APPROVED" if "HOLD" in refs else "UNKNOWN"
 
     def fee_active(self, acct, d):
-        return sum((e.amount for e in self.journal if e.account == acct
+        return sum((e.amount for e in self._journal if e.account == acct
                     and e.kind in ("FEE", "FEE_REVERSAL") and e.value_day == d), Decimal(0)) != 0
 
     # ---- commands: validate, then append ----------------------------------
@@ -97,9 +108,10 @@ class Ledger:
         """Audit note: event declared on a closed day, processed on `day`. Closed days are never reopened."""
         return self._log(ev, "LATE_ARRIVAL", acct, day, "ACCEPTED", f"declared Day {declared}, processed Day {day}")
 
-    def _check(self, ev, kind, acct, vd, day, detail):
-        if vd > day:   # future-dated value is out of scope
-            return self._log(ev, kind, acct, day, "REJECTED", f"{detail}future value_date")
+    def _future(self, ev, kind, acct, vd, day, ref=""):
+        """Future-dated value is out of scope: returns the REJECTED outcome, or None if vd is acceptable."""
+        if vd > day:
+            return self._log(ev, kind, acct, day, "REJECTED", f"value_date Day {vd} is after processing Day {day}", ref)
         return None
 
     def credit(self, ev, acct, amount, vd, day):
@@ -109,14 +121,15 @@ class Ledger:
         return self._simple(ev, "DEBIT", acct, -money(amount, self.accounts[acct]), vd, day)
 
     def _simple(self, ev, kind, acct, signed, vd, day):
-        bad = self._check(ev, kind, acct, vd, day, "")
-        if bad:
+        if bad := self._future(ev, kind, acct, vd, day):
             return bad
         self._post(ev, acct, kind, signed, vd, day)
         return self._log(ev, kind, acct, day, "ACCEPTED", f"{signed}")
 
     def credit_instalments(self, ev, acct, total, n, vd, day):
         """Equal split rounded down; the residual goes on the last instalment."""
+        if bad := self._future(ev, "CREDIT_INSTALMENTS", acct, vd, day):
+            return bad
         ccy = self.accounts[acct]
         total = money(total, ccy)
         base = (total / n).quantize(Decimal(1).scaleb(-PRECISION[ccy]), rounding=ROUND_DOWN)
@@ -128,35 +141,42 @@ class Ledger:
     def authorize(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
         detail = f"{auth_id} hold {amount}"
+        if bad := self._future(ev, "AUTHORIZATION", acct, vd, day, auth_id):
+            return bad
         if self.auth_state(auth_id) != "UNKNOWN":
-            return self._log(ev, "AUTHORIZATION", acct, day, "REJECTED", f"{auth_id} duplicate id")
+            return self._log(ev, "AUTHORIZATION", acct, day, "REJECTED", f"{auth_id} duplicate id", auth_id)
         after = self.available(acct, vd) - amount
         if after < 0:   # approved only if available stays >= 0 after the hold
             return self._log(ev, "AUTHORIZATION", acct, day, "DECLINED",
-                             f"{detail}; available after hold would be {after}")
+                             f"{detail}; available after hold would be {after}", auth_id)
         self._post(ev, acct, "HOLD", amount, vd, day, ref=auth_id)
         return self._log(ev, "AUTHORIZATION", acct, day, "ACCEPTED",
-                         f"{detail}; available after hold {after}")
+                         f"{detail}; available after hold {after}", auth_id)
 
     def settle(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
-        hold = next((e for e in self.journal if e.kind == "HOLD" and e.ref == auth_id and e.account == acct), None)
+        if bad := self._future(ev, "SETTLEMENT", acct, vd, day, auth_id):
+            return bad
+        hold = next((e for e in self._journal if e.kind == "HOLD" and e.ref == auth_id and e.account == acct), None)
         if hold is None:
-            # settlement with no authorization: nothing is debited; sits in the exception list
+            # no hold behind it: nothing is debited; the event sits in the exception list
+            why = "was declined" if self.auth_state(auth_id) == "DECLINED" else "does not exist"
             return self._log(ev, "SETTLEMENT", acct, day, "REJECTED",
-                             f"{auth_id} UNMATCHED: no authorization; {amount} not debited, routed to exceptions")
+                             f"{auth_id} UNMATCHED: auth {why}; {amount} not debited, routed to exceptions", auth_id)
         if self.auth_state(auth_id) == "SETTLED":
-            return self._log(ev, "SETTLEMENT", acct, day, "REJECTED", f"{auth_id} already settled")
+            return self._log(ev, "SETTLEMENT", acct, day, "REJECTED", f"{auth_id} already settled", auth_id)
         self._post(ev, acct, "SETTLEMENT", -amount, vd, day, ref=auth_id)
         self._post(ev, acct, "HOLD_RELEASE", hold.amount, vd, day, ref=auth_id)  # whole hold released
         return self._log(ev, "SETTLEMENT", acct, day, "ACCEPTED",
-                         f"{auth_id} settled {amount}; hold {hold.amount} released")
+                         f"{auth_id} settled {amount}; hold {hold.amount} released", auth_id)
 
     def reverse(self, ev, acct, target_ev, vd, day):
         """Compensating entry for CREDIT/DEBIT entries posted by `target_ev`. Original is untouched."""
-        targets = [e for e in self.journal if e.event == target_ev and e.account == acct
+        if bad := self._future(ev, "REVERSAL", acct, vd, day):
+            return bad
+        targets = [e for e in self._journal if e.event == target_ev and e.account == acct
                    and e.kind in ("CREDIT", "DEBIT")]
-        done = {e.ref for e in self.journal if e.kind == "REVERSAL"}
+        done = {e.ref for e in self._journal if e.kind == "REVERSAL"}
         if not targets or any(t.id in done for t in targets):
             return self._log(ev, "REVERSAL", acct, day, "REJECTED",
                              f"{target_ev} unknown or already reversed")
@@ -196,7 +216,7 @@ class Ledger:
 
     def capitalize_interest(self, acct, day=WINDOW):
         """One credit, value_date = `day`, equal to the sum of the rounded daily accruals."""
-        if any(e.kind == "INTEREST" and e.account == acct for e in self.journal):
+        if any(e.kind == "INTEREST" and e.account == acct for e in self._journal):
             return None
         total = sum((a for _, a in self.accruals(acct, day).values()), Decimal(0))
         return self._post(f"EOD{day}", acct, "INTEREST", total, day, day) if total else None

@@ -7,3 +7,4 @@ Real timestamps (local, +04), appended as work happens.
 - 2026-10-17 16:21  Tests (16 green + 1 annotated known failure), NUMBERS, AMBIGUITIES, REJECTED written. Test bug found+fixed: BHD floor is 1.250 not 1.249 (see REJECTED #9).
 - 2026-10-17 16:23  ARCHITECTURE.md + PDF (3 pages), README written. Banned-wording grep clean (one hit in replay.py docstring fixed).
 - 2026-10-17 16:25  Review fixes: known-failure test now uses available (ledger - holds); PDF regenerated (3 pages). Next: user creates empty public repo, I push.
+- 2026-10-17 16:31  Self-review fixes: read-only history views, structured Event.ref, future-date guard on all commands, declined-auth settlement message, generated docs/arch.html untracked. 19 green + 1 known failure.

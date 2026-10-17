@@ -88,10 +88,32 @@ class Rules(unittest.TestCase):
 
     def test_history_only_grows_and_reversal_keeps_original(self):
         lg = through_day5()
-        snapshot = list(lg.journal)
+        snapshot = lg.journal
         lg.reverse("E9", A1, "E7", 2, 6); lg.end_of_day(6)
         self.assertEqual(lg.journal[:len(snapshot)], snapshot)
         self.assertGreater(len(lg.journal), len(snapshot))
+
+    def test_history_views_are_read_only(self):
+        lg = through_day5()
+        for view in (lg.journal, lg.events):
+            self.assertFalse(hasattr(view, "append") or hasattr(view, "pop"))
+        with self.assertRaises(AttributeError):
+            lg.journal = ()
+
+    def test_settlement_of_declined_auth_is_unmatched_with_reason(self):
+        lg = through_day5()   # Auth-B was declined: no hold exists, so nothing can settle against it
+        self.assertEqual(lg.settle("E11", A1, "Auth-B", "90.00", 5, 5), "REJECTED")
+        self.assertIn("was declined", lg.events[-1].detail)
+        self.assertEqual(lg.balance(A1, 5), D("-230.00"))
+
+    def test_future_value_date_rejected_by_every_command(self):
+        lg = through_day5()
+        n = len(lg.journal)
+        calls = (lg.credit("X1", A1, "1.00", 6, 5), lg.debit("X2", A1, "1.00", 6, 5),
+                 lg.authorize("X3", A1, "Auth-F", "1.00", 6, 5), lg.settle("X4", A1, "Auth-A", "1.00", 6, 5),
+                 lg.reverse("X5", A1, "E7", 6, 5), lg.credit_instalments("X6", A2, "3.000", 3, 6, 5))
+        self.assertEqual(set(calls), {"REJECTED"})
+        self.assertEqual(len(lg.journal), n)   # nothing posted
 
     def test_double_reversal_rejected(self):
         lg = through_day5()

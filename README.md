@@ -6,8 +6,8 @@ Append-only, event-sourced, in-memory ledger. Python 3.13, standard library only
 
 ```bash
 python3 replay.py                                   # replays the event stream, prints per-day report
-python3 -m unittest tests.test_ledger               # 16 tests, all green
-python3 -m unittest discover -s tests -t .          # 17 tests: exactly 1 FAILS on purpose (see below)
+python3 -m unittest tests.test_ledger               # 19 tests, all green
+python3 -m unittest discover -s tests -t .          # 20 tests: exactly 1 FAILS on purpose (see below)
 python3 -m unittest tests.test_known_failure        # the annotated failing test on its own
 ```
 
