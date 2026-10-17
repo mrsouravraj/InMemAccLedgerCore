@@ -1,0 +1,120 @@
+import unittest
+from dataclasses import FrozenInstanceError
+from decimal import Decimal as D
+
+from ledger import Ledger, WINDOW
+from replay import run, ACCOUNTS, A1, A2
+
+
+def through_day5():
+    """Day 1..5 as replayed (E1-E8) with EOD5 run: the state before E9/E10."""
+    lg = Ledger(ACCOUNTS)
+    lg.credit("E1", A1, "1200.00", 1, 1); lg.debit("E2", A1, "950.00", 1, 1); lg.end_of_day(1)
+    lg.authorize("E3", A1, "Auth-A", "200.00", 2, 2); lg.end_of_day(2)
+    lg.credit("E4", A1, "400.00", 3, 3); lg.end_of_day(3)
+    lg.settle("E5", A1, "Auth-A", "185.00", 4, 4); lg.settle("E6", A1, "Auth-Z", "180.00", 4, 4); lg.end_of_day(4)
+    lg.debit("E7", A1, "620.00", 2, 5); lg.authorize("E8", A1, "Auth-B", "90.00", 5, 5); lg.end_of_day(5)
+    return lg
+
+
+def fees(lg, kind="FEE"):
+    return [(e.value_day, e.amount) for e in lg.journal if e.kind == kind]
+
+
+class Criteria(unittest.TestCase):
+    def test_c1_day2_balance_before_fee_is_minus_370(self):
+        lg = through_day5()
+        self.assertEqual(lg.balance(A1, 2, skip=lambda e: e.kind == "FEE"), D("-370.00"))
+
+    def test_c2_e7_causes_three_fees_not_one(self):
+        self.assertEqual(fees(through_day5()), [(2, D("-25.00")), (4, D("-25.00")), (5, D("-25.00"))])
+
+    def test_c2_fee_cascade_day3_stays_positive(self):
+        lg = through_day5()   # D2 fee drops Day 3 from 30.00 to 5.00: still >= 0, no fee
+        self.assertEqual(lg.balance(A1, 3), D("5.00"))
+        self.assertFalse(lg.fee_active(A1, 3))
+
+    def test_c3_auth_a_settlement_accepted_and_hold_released(self):
+        lg = through_day5()
+        self.assertEqual(lg.auth_state("Auth-A"), "SETTLED")
+        self.assertEqual(lg.active_holds(A1), D("0.00"))
+
+    def test_c4_unknown_auth_not_debited_and_logged(self):
+        lg = through_day5()
+        e6 = [e for e in lg.events if e.event == "E6"][0]
+        self.assertEqual(e6.outcome, "REJECTED")
+        self.assertTrue(all(x.event != "E6" for x in lg.journal))   # nothing posted
+
+    def test_c5_hold_reduces_available_not_ledger(self):
+        lg = Ledger(ACCOUNTS)   # world without E7, where Auth-B is approved
+        lg.credit("E1", A1, "465.00", 1, 5)
+        before = lg.balance(A1, 5)
+        self.assertEqual(lg.authorize("E8", A1, "Auth-B", "90.00", 5, 5), "ACCEPTED")
+        self.assertEqual(lg.balance(A1, 5), before)
+        self.assertEqual(lg.available(A1, 5), before - D("90.00"))
+
+    def test_c5_in_the_real_stream_auth_b_is_declined(self):
+        self.assertEqual(through_day5().auth_state("Auth-B"), "DECLINED")
+
+    def test_c6_not_a_return_to_pre_e7_state(self):
+        lg, _ = run()
+        self.assertEqual([lg.balance(A1, d, skip=lambda e: e.kind == "INTEREST") for d in range(1, 7)],
+                         [D(x) for x in ("250.00", "250.00", "650.00", "465.00", "465.00", "465.00")])
+        self.assertEqual(len(fees(lg)), 3)               # fees were assessed...
+        self.assertEqual(len(fees(lg, "FEE_REVERSAL")), 3)   # ...and netted by compensating entries
+        self.assertEqual(lg.auth_state("Auth-B"), "DECLINED")  # decision made on then-known state stays
+
+    def test_c7_instalments_3333_3333_3334(self):
+        lg, _ = run()
+        parts = [e.amount for e in lg.journal if e.account == A2 and e.kind == "CREDIT"]
+        self.assertEqual(parts, [D("3.333"), D("3.333"), D("3.334")])
+        self.assertEqual(sum(parts), D("10.000"))
+
+    def test_c8_interest_capitalized_equals_sum_of_rounded(self):
+        lg, _ = run()
+        for acct in ACCOUNTS:
+            total = sum((a for _, a in lg.accruals(acct).values()), D(0))
+            cap = sum((e.amount for e in lg.journal if e.account == acct and e.kind == "INTEREST"), D(0))
+            self.assertEqual(total, cap)
+        self.assertEqual(lg.balance(A1, WINDOW), D("466.03"))
+        self.assertEqual(lg.balance(A2, WINDOW), D("10.008"))
+
+
+class Rules(unittest.TestCase):
+    def test_entries_are_immutable(self):
+        lg = through_day5()
+        with self.assertRaises(FrozenInstanceError):
+            lg.journal[0].amount = D(0)
+
+    def test_history_only_grows_and_reversal_keeps_original(self):
+        lg = through_day5()
+        snapshot = list(lg.journal)
+        lg.reverse("E9", A1, "E7", 2, 6); lg.end_of_day(6)
+        self.assertEqual(lg.journal[:len(snapshot)], snapshot)
+        self.assertGreater(len(lg.journal), len(snapshot))
+
+    def test_double_reversal_rejected(self):
+        lg = through_day5()
+        self.assertEqual(lg.reverse("E9", A1, "E7", 2, 6), "ACCEPTED")
+        self.assertEqual(lg.reverse("E9b", A1, "E7", 2, 6), "REJECTED")
+
+    def test_zero_balance_is_not_overdrawn(self):
+        lg = Ledger(ACCOUNTS); lg.credit("E1", A1, "10.00", 1, 1); lg.debit("E2", A1, "10.00", 1, 1)
+        self.assertEqual(lg.end_of_day(1), [])
+
+    def test_bhd_overdraft_has_no_defined_fee(self):
+        lg = Ledger(ACCOUNTS); lg.debit("E1", A2, "1.000", 1, 1)
+        with self.assertRaises(ValueError):
+            lg.end_of_day(1)
+
+    def test_interest_rounding_floors(self):
+        # smallest balance that earns a non-zero daily accrual: 12.50 AED (0.005 -> 0.01), 1.250 BHD (0.0005 -> 0.001)
+        for acct, below, at, got in ((A1, "12.49", "12.50", "0.01"), (A2, "1.249", "1.250", "0.001")):
+            lg = Ledger(ACCOUNTS); lg.credit("E1", acct, below, 1, 1)
+            self.assertEqual(lg.accruals(acct, 1)[1][1], D(0))
+            lg = Ledger(ACCOUNTS); lg.credit("E1", acct, at, 1, 1)
+            self.assertEqual(lg.accruals(acct, 1)[1][1], D(got))
+
+
+if __name__ == "__main__":
+    unittest.main()
