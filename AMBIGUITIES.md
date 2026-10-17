@@ -65,7 +65,7 @@ The spec gates authorizations only. Debits (E2, E7), settlements and fees are po
 No. Both use the ledger balance, as the spec says.
 
 **19. "Once per day per account".**
-Resolved as at most one **active** fee per value day (fees minus reversals). It does not mean "ever assessed once". If a fee is reversed and the day later turns negative again (a second back-dated debit), a new `FEE` is posted for that day: the journal then holds FEE, FEE_REVERSAL, FEE for the same day, and the customer is charged once. Reasoning: the reversal answered the first shortfall; a later shortfall is a new event, and refusing to charge would let a back-dated item erase a charge the rule says is due. The stricter reading (one fee per day for the account's whole life) would leave the second shortfall uncharged. Pinned by `test_fee_reinstated_when_a_day_goes_negative_again`.
+Resolved as: a fee is assessed **at most once ever** per account per value day (`fee_assessed`), strict wording. If E9-style corrections reverse it, the refund is a `FEE_REVERSAL`; if the day later turns negative again, **no second fee** is posted, so the journal shows FEE, FEE_REVERSAL and nothing further. Cost: a genuine second shortfall on an already-charged day is not charged. Chosen because the requirement says "once per account/day" and a FEE -> REFUND -> FEE sequence would charge that day twice. Pinned by `test_fee_is_assessed_at_most_once_per_day_even_after_a_refund`. Exception: a day never charged is charged whenever it is found negative (retroactive charge).
 
 **20. Opening balance entries.**
 Both opening balances are 0, so there is no opening entry in the journal.

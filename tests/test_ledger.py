@@ -222,15 +222,89 @@ class Hardening(unittest.TestCase):
         self.assertIsNone(lg.capitalize_interest(A2, 6))
         self.assertEqual(lg.credit("a", A2, "5.000", 1, 6), "REJECTED")
 
-    def test_fee_reinstated_when_a_day_goes_negative_again(self):
-        # Policy (AMBIGUITIES #19): at most one ACTIVE fee per day. A day that turns negative again after a refund is a new shortfall.
+    def test_fee_is_assessed_at_most_once_per_day_even_after_a_refund(self):
+        # Policy (AMBIGUITIES #19): once per account per day, ever. FEE -> REFUND -> (negative again) must NOT re-charge.
         lg = Ledger(ACCOUNTS)
         lg.debit("a", A1, "10.00", 1, 1); lg.end_of_day(1)
         lg.credit("b", A1, "10.00", 1, 2); lg.end_of_day(2)
         lg.debit("c", A1, "10.00", 1, 3); lg.end_of_day(3)
-        self.assertEqual([(e.kind, e.value_day) for e in lg.journal if e.kind.startswith("FEE") and e.value_day == 1],
-                         [("FEE", 1), ("FEE_REVERSAL", 1), ("FEE", 1)])   # Days 2 and 3 cascade separately
-        self.assertTrue(lg.fee_active(A1, 1))
+        day1 = [(e.kind, e.value_day) for e in lg.journal if e.kind.startswith("FEE") and e.value_day == 1]
+        self.assertEqual(day1, [("FEE", 1), ("FEE_REVERSAL", 1)])
+        self.assertTrue(lg.fee_assessed(A1, 1))
+        self.assertFalse(lg.fee_active(A1, 1))
+
+    def test_capitalization_only_on_day_6(self):
+        lg = through_day5()
+        n = len(lg.journal)
+        with self.assertRaises(ValueError):
+            lg.capitalize_interest(A1, 5)
+        self.assertEqual(len(lg.journal), n)
+        self.assertFalse(lg._finalized(A1))
+
+    def test_finalization_cannot_skip_an_overdraft_fee(self):
+        # Day 6 close without calling end_of_day first: capitalization must reconcile fees itself.
+        lg = through_day5()                      # Day 5 closes at -230.00 with fees on days 2, 4, 5
+        lg.capitalize_interest(A1, 6)            # E9 never arrived: fees stand, no interest on negative days
+        self.assertEqual([e.value_day for e in lg.journal if e.kind == "FEE"], [2, 4, 5, 6])
+        lg2 = Ledger(ACCOUNTS)
+        lg2.debit("a", A1, "10.00", 1, 1)        # day 1 negative, EOD never run
+        lg2.capitalize_interest(A1, 6)
+        self.assertEqual([e.value_day for e in lg2.journal if e.kind == "FEE"], [1, 2, 3, 4, 5, 6])
+        self.assertIsNone(lg2.capitalize_interest(A1, 6))   # repeat does nothing
+        self.assertEqual(sum(e.kind == "CAPITALIZATION" for e in lg2.events), 1)
+
+    def test_failed_instalment_rolls_back_and_retry_does_not_double_post(self):
+        lg = Ledger(ACCOUNTS)
+        real, calls = lg._post, []
+        def flaky(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom on instalment 2")
+            return real(*a, **k)
+        lg._post = flaky
+        with self.assertRaises(RuntimeError):
+            lg.credit_instalments("E10", A2, "10.000", 3, 5, 5)
+        self.assertEqual((len(lg.journal), len(lg.events)), (0, 0))   # nothing half-posted, no outcome logged
+        del lg._post                                                    # back to the real method
+        self.assertEqual(lg.credit_instalments("E10", A2, "10.000", 3, 5, 5), "ACCEPTED")
+        self.assertEqual(lg.balance(A2, 5), D("10.000"))                # never 13.333
+
+    def test_failed_settlement_rolls_back_debit_and_hold_release_together(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("c", A1, "500.00", 1, 1); lg.authorize("a", A1, "Auth-A", "100.00", 1, 1)
+        real, calls = lg._post, []
+        def flaky(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:               # the HOLD_RELEASE, after the settlement debit
+                raise RuntimeError("boom on release")
+            return real(*a, **k)
+        lg._post = flaky
+        n = len(lg.journal)
+        with self.assertRaises(RuntimeError):
+            lg.settle("s", A1, "Auth-A", "90.00", 1, 1)
+        self.assertEqual(len(lg.journal), n)
+        self.assertEqual(lg.auth_state("Auth-A"), "APPROVED")
+        del lg._post
+        self.assertEqual(lg.settle("s", A1, "Auth-A", "90.00", 1, 1), "ACCEPTED")
+        self.assertEqual((lg.balance(A1, 1), lg.active_holds(A1)), (D("410.00"), D("0.00")))
+
+    def test_mutable_identifiers_are_rejected_before_anything_is_stored(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("c", A1, "500.00", 1, 1)
+        n = (len(lg.journal), len(lg.events))
+        for bad in (["Auth-A"], {"a": 1}, ("Auth-A",), 7, "", "  ", None):
+            with self.assertRaises(ValueError):
+                lg.authorize("e1", A1, bad, "10.00", 1, 1)
+            with self.assertRaises(ValueError):
+                lg.settle("e2", A1, bad, "10.00", 1, 1)
+            with self.assertRaises(ValueError):
+                lg.reverse("e3", A1, bad, 1, 1)
+            with self.assertRaises(ValueError):
+                lg.credit(bad, A1, "1.00", 1, 1)
+            with self.assertRaises(ValueError):
+                lg.credit("e4", bad, "1.00", 1, 1)
+        self.assertEqual((len(lg.journal), len(lg.events), lg.active_holds(A1)), (n[0], n[1], D("0.00")))
+        self.assertEqual(lg.authorize("e1", A1, "Auth-A", "10.00", 1, 1), "ACCEPTED")   # ids were never consumed
 
     def test_identifiers_compare_exactly_but_amounts_numerically(self):
         lg = Ledger(ACCOUNTS)

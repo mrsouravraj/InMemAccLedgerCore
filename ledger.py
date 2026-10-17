@@ -1,10 +1,11 @@
 """In-memory account ledger core.
 
-Event-sourced: two append-only lists (`events`, `journal`) are the only stored
-state. Balances, available balance, auth state and active fees are all derived
+Event-sourced: two append-only lists (`events`, `journal`) hold all history, plus a write-once
+event-id index for idempotency. Balances, available balance, auth state and active fees are all derived
 from them on demand. No I/O and no clock here: the caller passes the business
 `day` a command is processed on (see replay.py).
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 
@@ -22,6 +23,7 @@ MEMO = {"HOLD", "HOLD_RELEASE"}            # affect available balance, not ledge
 # Arguments are (acct, ..., value_day, processing_day).
 AMOUNT_AT = {"credit": 1, "debit": 1, "credit_instalments": 1, "authorize": 2, "settle": 2}
 COUNT_AT = {"credit_instalments": 2}
+ID_AT = {"authorize": 1, "settle": 1, "reverse": 1}   # auth id / reversal target: identifiers beyond event and account
 
 
 def _is_day(x):
@@ -34,13 +36,17 @@ def command(fn):
        DUPLICATE, no effect. Same id + different payload: REJECTED. The processing day is not part of the payload.
        Amounts compare numerically ("100.0" == "100.00"); identifiers compare exactly ("01" != "1").
     2. Validation (`_invalid`) runs before anything is posted; a failure is a logged REJECTED event, not an exception.
-    3. If the command itself raises, the id is released: no outcome was recorded, so a corrected retry is legal."""
+    3. Identifiers (event, account, auth id, reversal target) must be non-empty strings; anything else raises
+       before anything is stored. Strings are kept exactly, never normalised.
+    4. All-or-nothing: if the command raises, every entry and event it staged is rolled back and the id is released,
+       so a corrected retry starts from a clean ledger and cannot double-post."""
     name = fn.__name__
 
     def wrapper(self, ev, *args):
-        if not isinstance(ev, str) or not ev.strip():
-            raise ValueError("event id must be a non-empty string")
         acct, day = args[0], args[-1]
+        ids = [ev, acct] + ([args[ID_AT[name]]] if name in ID_AT else [])
+        if not all(isinstance(i, str) and i.strip() for i in ids):
+            raise ValueError(f"identifiers must be non-empty strings, got {ids!r}")
         if acct not in self.accounts:
             raise KeyError(acct)
         kind = name.upper()
@@ -52,10 +58,11 @@ def command(fn):
             return self._log(ev, kind, acct, day, "REJECTED", f"event id already used for a different payload ({seen[0]})")
         self._received[ev] = payload
         try:
-            if why := self._invalid(name, acct, args):
-                return self._log(ev, kind, acct, day, "REJECTED", why, str(args[1]) if name in ("authorize", "settle") else "")
-            return fn(self, ev, *args)
-        except Exception:
+            with self._atomic():
+                if why := self._invalid(name, acct, args):
+                    return self._log(ev, kind, acct, day, "REJECTED", why, str(args[1]) if name in ("authorize", "settle") else "")
+                return fn(self, ev, *args)
+        except BaseException:
             del self._received[ev]
             raise
     wrapper.__name__, wrapper.__doc__ = name, fn.__doc__
@@ -121,6 +128,17 @@ class Ledger:
     def journal(self):
         return tuple(self._journal)
 
+    @contextmanager
+    def _atomic(self):
+        """Commit group: staged entries and events either all stay or, on any exception, are all dropped.
+        Only the uncommitted tail of this call is ever removed; committed history is never touched."""
+        j, e = len(self._journal), len(self._events)
+        try:
+            yield
+        except BaseException:
+            del self._journal[j:], self._events[e:]
+            raise
+
     # ---- append-only primitives -------------------------------------------
     def _post(self, ev, acct, kind, amount, vd, day, ref=""):
         e = Entry(f"J{len(self._journal) + 1}", ev, acct, kind,
@@ -154,6 +172,10 @@ class Ledger:
         if "SETTLEMENT" in refs:
             return "SETTLED"
         return "APPROVED" if "HOLD" in refs else "UNKNOWN"
+
+    def fee_assessed(self, acct, d):
+        """Has a fee ever been charged for day d (even if since reversed)? Enforces once per account per day."""
+        return any(e.account == acct and e.kind == "FEE" and e.value_day == d for e in self._journal)
 
     def fee_active(self, acct, d):
         return sum((e.amount for e in self._journal if e.account == acct
@@ -266,27 +288,30 @@ class Ledger:
         """Closing balance of day d, excluding day d's own fee (otherwise a fee justifies itself)."""
         return self.balance(acct, d, skip=lambda e: e.kind in ("FEE", "FEE_REVERSAL") and e.value_day == d)
 
+    def _assess_fees(self, acct, day):
+        """Fee reconciliation for one account over days 1..day, ascending (earlier fees feed later bases).
+        A day is charged at most once ever: a day whose fee was reversed is not charged again."""
+        ccy = self.accounts[acct]
+        for d in range(1, day + 1):
+            negative = self._fee_base(acct, d) < 0
+            if negative and ccy not in OVERDRAFT_FEE:
+                raise ValueError(f"no overdraft fee defined for {ccy}")
+            if negative and not self.fee_assessed(acct, d):
+                self._post(f"EOD{day}", acct, "FEE", -OVERDRAFT_FEE[ccy], d, day, ref=f"day{d}")
+            elif not negative and self.fee_active(acct, d):
+                self._post(f"EOD{day}", acct, "FEE_REVERSAL", OVERDRAFT_FEE[ccy], d, day, ref=f"day{d}")
+
     def end_of_day(self, day):
-        """Re-evaluate overdraft fees for every day <= `day`, ascending (earlier fees feed later bases).
-        Back-valued entries can create fees on closed days; their correction reverses them.
-        All-or-nothing: a currency with no fee tariff that is overdrawn raises before anything is posted.
-        Finalized (capitalized) accounts are skipped: their fees are frozen with the interest."""
+        """Re-evaluate overdraft fees for every day <= `day`. Back-valued entries can create fees on closed days;
+        their correction reverses them. All-or-nothing across accounts. Finalized accounts are skipped."""
         if not _is_day(day):
             raise ValueError(f"day must be a whole number in 1..{WINDOW}")
-        live = {a: c for a, c in self.accounts.items() if not self._finalized(a)}
-        for acct, ccy in live.items():   # preflight; a currency without a tariff never carries fees, so its base is exact
-            if ccy not in OVERDRAFT_FEE and any(self._fee_base(acct, d) < 0 for d in range(1, day + 1)):
-                raise ValueError(f"no overdraft fee defined for {ccy}")
-        new = []
-        for acct, ccy in live.items():
-            for d in range(1, day + 1):
-                negative = self._fee_base(acct, d) < 0
-                if negative == self.fee_active(acct, d):
-                    continue
-                fee = OVERDRAFT_FEE[ccy]
-                new.append(self._post(f"EOD{day}", acct, "FEE" if negative else "FEE_REVERSAL",
-                                      -fee if negative else fee, d, day, ref=f"day{d}"))
-        return new
+        mark = len(self._journal)
+        with self._atomic():
+            for acct in self.accounts:
+                if not self._finalized(acct):
+                    self._assess_fees(acct, day)
+        return self._journal[mark:]
 
     def accruals(self, acct, last_day=WINDOW):
         """Per-day rounded interest on the final restated closing balance (capitalization excluded)."""
@@ -298,12 +323,19 @@ class Ledger:
         return out
 
     def capitalize_interest(self, acct, day=WINDOW):
-        """One credit, value_date = `day`, equal to the sum of the rounded daily accruals. Closes the account's
-        window: later inputs are rejected, so the accruals can never drift from what was capitalized.
+        """Finalize an account: one controlled operation, Day 6 only. Fees are reconciled first, then the rounded
+        daily accruals are summed into one credit (value_date Day 6), then the window closes: later inputs are
+        rejected, so accruals can never drift from what was capitalized. Repeating it does nothing.
         The CAPITALIZATION event is logged even when the total is zero, so finalization is always on record."""
+        if day != WINDOW:
+            raise ValueError(f"interest is capitalized only at the end of Day {WINDOW}, not Day {day!r}")
+        if acct not in self.accounts:
+            raise KeyError(acct)
         if self._finalized(acct):
             return None
-        total = sum((a for _, a in self.accruals(acct, day).values()), Decimal(0))
-        entry = self._post(f"EOD{day}", acct, "INTEREST", total, day, day) if total else None
-        self._log(f"EOD{day}", "CAPITALIZATION", acct, day, "ACCEPTED", f"capitalized {money(total, self.accounts[acct])}")
+        with self._atomic():
+            self._assess_fees(acct, day)
+            total = sum((a for _, a in self.accruals(acct, day).values()), Decimal(0))
+            entry = self._post(f"EOD{day}", acct, "INTEREST", total, day, day) if total else None
+            self._log(f"EOD{day}", "CAPITALIZATION", acct, day, "ACCEPTED", f"capitalized {money(total, self.accounts[acct])}")
         return entry

@@ -1,6 +1,6 @@
 # Ledger Core: Architecture and Trade-offs
 
-**Design in one line.** Two append-only lists (an event log with outcomes, and a journal of frozen entries) are the only stored state. Balances, available balance, authorization state and active fees are derived by folding over them. The ledger has no clock and no I/O.
+**Design in one line.** Two append-only lists (an event log with outcomes, and a journal of frozen entries) hold all history (plus a write-once event-id index for idempotency). Balances, available balance, authorization state and active fees are derived by folding over them. The ledger has no clock and no I/O.
 
 ## 1. Append-only at scale
 
