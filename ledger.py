@@ -6,7 +6,7 @@ from them on demand. No I/O and no clock here: the caller passes the business
 `day` a command is processed on (see replay.py).
 """
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 
 # --- constants (see NUMBERS.md) -------------------------------------------
 PRECISION = {"AED": 2, "BHD": 3}          # minor units per currency
@@ -16,6 +16,35 @@ DAILY_RATE = Decimal("0.0004")             # 0.04% per day
 WINDOW = 6                                 # Day 1 .. Day 6
 
 MEMO = {"HOLD", "HOLD_RELEASE"}            # affect available balance, not ledger balance
+
+
+def _canon(x):
+    """Canonical text of a payload field, so "100.0" and "100.00" compare equal."""
+    try:
+        return str(Decimal(str(x)).normalize())
+    except InvalidOperation:
+        return str(x)
+
+
+def command(fn):
+    """Event-id check for every input command. An id is consumed on first receipt, whatever the outcome.
+    Same id + same payload = redelivery: logged DUPLICATE, no effect. Same id + different payload: REJECTED.
+    The processing day (last argument) is not part of the payload, so a redelivery on a later day is still a duplicate."""
+    def wrapper(self, ev, *args):
+        if not isinstance(ev, str) or not ev.strip():
+            raise ValueError("event id must be a non-empty string")
+        payload = (fn.__name__, tuple(_canon(a) for a in args[:-1]))
+        kind, acct, day = fn.__name__.upper(), args[0], args[-1]
+        seen = self._received.get(ev)
+        if seen is None:
+            self._received[ev] = payload
+            return fn(self, ev, *args)
+        if seen == payload:
+            return self._log(ev, kind, acct, day, "DUPLICATE", "redelivery of an event id already received; ignored")
+        return self._log(ev, kind, acct, day, "REJECTED", f"event id already used for a different payload ({seen[0]})")
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 
 def money(x, ccy):
@@ -44,7 +73,7 @@ class Event:
     kind: str
     account: str
     day: int          # processing day
-    outcome: str      # ACCEPTED | REJECTED | DECLINED
+    outcome: str      # ACCEPTED | REJECTED | DECLINED | DUPLICATE
     detail: str = ""
     ref: str = ""     # auth id for AUTHORIZATION/SETTLEMENT events
 
@@ -54,6 +83,7 @@ class Ledger:
         self.accounts = dict(accounts)   # id -> currency; opening balances are all zero
         self._events: list[Event] = []
         self._journal: list[Entry] = []
+        self._received: dict[str, tuple] = {}   # event id -> payload; write-once index for the id check
 
     # Read-only views: callers get a tuple snapshot, so nothing outside can remove or reorder history.
     # ponytail: O(n) copy per access; fine here, expose an iterator/slice view if it ever shows up in a profile.
@@ -114,9 +144,11 @@ class Ledger:
             return self._log(ev, kind, acct, day, "REJECTED", f"value_date Day {vd} is after processing Day {day}", ref)
         return None
 
+    @command
     def credit(self, ev, acct, amount, vd, day):
         return self._simple(ev, "CREDIT", acct, money(amount, self.accounts[acct]), vd, day)
 
+    @command
     def debit(self, ev, acct, amount, vd, day):
         return self._simple(ev, "DEBIT", acct, -money(amount, self.accounts[acct]), vd, day)
 
@@ -126,6 +158,7 @@ class Ledger:
         self._post(ev, acct, kind, signed, vd, day)
         return self._log(ev, kind, acct, day, "ACCEPTED", f"{signed}")
 
+    @command
     def credit_instalments(self, ev, acct, total, n, vd, day):
         """Equal split rounded down; the residual goes on the last instalment."""
         if bad := self._future(ev, "CREDIT_INSTALMENTS", acct, vd, day):
@@ -138,6 +171,7 @@ class Ledger:
             self._post(ev, acct, "CREDIT", p, vd, day, ref=f"{ev}.{i}")
         return self._log(ev, "CREDIT_INSTALMENTS", acct, day, "ACCEPTED", " + ".join(map(str, parts)))
 
+    @command
     def authorize(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
         detail = f"{auth_id} hold {amount}"
@@ -153,6 +187,7 @@ class Ledger:
         return self._log(ev, "AUTHORIZATION", acct, day, "ACCEPTED",
                          f"{detail}; available after hold {after}", auth_id)
 
+    @command
     def settle(self, ev, acct, auth_id, amount, vd, day):
         amount = money(amount, self.accounts[acct])
         if bad := self._future(ev, "SETTLEMENT", acct, vd, day, auth_id):
@@ -170,6 +205,7 @@ class Ledger:
         return self._log(ev, "SETTLEMENT", acct, day, "ACCEPTED",
                          f"{auth_id} settled {amount}; hold {hold.amount} released", auth_id)
 
+    @command
     def reverse(self, ev, acct, target_ev, vd, day):
         """Compensating entry for CREDIT/DEBIT entries posted by `target_ev`. Original is untouched."""
         if bad := self._future(ev, "REVERSAL", acct, vd, day):

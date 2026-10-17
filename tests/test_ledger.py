@@ -115,6 +115,32 @@ class Rules(unittest.TestCase):
         self.assertEqual(set(calls), {"REJECTED"})
         self.assertEqual(len(lg.journal), n)   # nothing posted
 
+    def test_redelivered_event_is_ignored_even_on_a_later_day(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("E1", A1, "100.00", 1, 1)
+        self.assertEqual(lg.credit("E1", A1, "100.00", 1, 2), "DUPLICATE")
+        self.assertEqual(lg.credit("E1", A1, "100.0", 1, 1), "DUPLICATE")   # same amount, different spelling
+        self.assertEqual(lg.balance(A1, 2), D("100.00"))
+        self.assertEqual(len(lg.journal), 1)
+        self.assertEqual([e.outcome for e in lg.events], ["ACCEPTED", "DUPLICATE", "DUPLICATE"])
+
+    def test_conflicting_payload_on_same_event_id_rejected(self):
+        lg = Ledger(ACCOUNTS)
+        lg.credit("E1", A1, "100.00", 1, 1)
+        self.assertEqual(lg.credit("E1", A1, "999.00", 1, 1), "REJECTED")
+        self.assertEqual(lg.debit("E1", A1, "100.00", 1, 1), "REJECTED")   # different command, same id
+        self.assertEqual(lg.balance(A1, 1), D("100.00"))
+
+    def test_rejected_event_still_consumes_its_id(self):
+        lg = Ledger(ACCOUNTS)
+        self.assertEqual(lg.credit("E1", A1, "5.00", 3, 1), "REJECTED")   # future-dated
+        self.assertEqual(lg.credit("E1", A1, "5.00", 1, 1), "REJECTED")   # corrected resend needs a new id
+        self.assertEqual(lg.credit("E1b", A1, "5.00", 1, 1), "ACCEPTED")
+
+    def test_blank_event_id_is_a_programming_error(self):
+        with self.assertRaises(ValueError):
+            Ledger(ACCOUNTS).credit("  ", A1, "1.00", 1, 1)
+
     def test_double_reversal_rejected(self):
         lg = through_day5()
         self.assertEqual(lg.reverse("E9", A1, "E7", 2, 6), "ACCEPTED")

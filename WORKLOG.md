@@ -8,3 +8,4 @@ Real timestamps (local, +04), appended as work happens.
 - 2026-10-17 16:23  ARCHITECTURE.md + PDF (3 pages), README written. Banned-wording grep clean (one hit in replay.py docstring fixed).
 - 2026-10-17 16:25  Review fixes: known-failure test now uses available (ledger - holds); PDF regenerated (3 pages). Next: user creates empty public repo, I push.
 - 2026-10-17 16:31  Self-review fixes: read-only history views, structured Event.ref, future-date guard on all commands, declined-auth settlement message, generated docs/arch.html untracked. 19 green + 1 known failure.
+- 2026-10-17 16:38  Added event-id validation (@command: DUPLICATE for same payload, REJECTED for conflicting payload); 4 new tests; docs + PDF updated.

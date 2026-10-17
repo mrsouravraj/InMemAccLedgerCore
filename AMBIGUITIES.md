@@ -72,3 +72,7 @@ Both opening balances are 0, so there is no opening entry in the journal.
 
 **21. Reversal of a credit that would overdraw the account.**
 Not exercised. The reversal is posted regardless, like any back-office correction; fees then follow from the re-check.
+
+**22. Event ids: redelivery and conflicts.**
+The spec labels each event (E1..E10) but never says what a repeated or reused label means. Resolved: an id is consumed on first receipt, whatever its outcome. The same id with the same payload (amounts compared numerically, so "100.0" equals "100.00"; processing day ignored) is a redelivery: logged `DUPLICATE`, no effect. The same id with a different payload is `REJECTED` and logged; the first event stands. A rejected event still consumes its id, so a corrected resend must use a new id. A blank id is a programming error and raises.
+Practice: message-driven cores treat the id as an idempotency key so retries cannot double-post. The stream here has no repeats, so printed numbers are unchanged. Limit: the id index lives in memory, so it does not survive a restart (see Part 2).

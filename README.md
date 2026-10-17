@@ -6,8 +6,8 @@ Append-only, event-sourced, in-memory ledger. Python 3.13, standard library only
 
 ```bash
 python3 replay.py                                   # replays the event stream, prints per-day report
-python3 -m unittest tests.test_ledger               # 19 tests, all green
-python3 -m unittest discover -s tests -t .          # 20 tests: exactly 1 FAILS on purpose (see below)
+python3 -m unittest tests.test_ledger               # 23 tests, all green
+python3 -m unittest discover -s tests -t .          # 24 tests: exactly 1 FAILS on purpose (see below)
 python3 -m unittest tests.test_known_failure        # the annotated failing test on its own
 ```
 
@@ -15,7 +15,7 @@ python3 -m unittest tests.test_known_failure        # the annotated failing test
 
 For each `=== DAY n close ===` block:
 
-- **Event lines** `E3 AUTHORIZATION ACC-001 ACCEPTED …`: every input event processed that day with its outcome (`ACCEPTED` / `REJECTED` / `DECLINED`) and the numbers behind the decision. A `LATE_ARRIVAL` line marks an event declared on an earlier day but processed today.
+- **Event lines** `E3 AUTHORIZATION ACC-001 ACCEPTED …`: every input event processed that day with its outcome (`ACCEPTED` / `REJECTED` / `DECLINED` / `DUPLICATE`) and the numbers behind the decision. A `LATE_ARRIVAL` line marks an event declared on an earlier day but processed today.
 - **`EODn FEE` / `FEE_REVERSAL` / `INTEREST` lines**: postings the system made at that close. The `value Day d` column is the day the posting counts for, which can be earlier than the day shown.
 - **`ledger` / `available` / `holds`**: closing balance (entries with value date ≤ that day, as known at that close), balance minus active holds, and total active holds.
 - **`auths`**: state of each authorization (`APPROVED`, `DECLINED`, `SETTLED`).

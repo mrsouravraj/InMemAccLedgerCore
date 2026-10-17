@@ -44,7 +44,7 @@ def run():
             out.append(f"  {acct} {ccy}  ledger {lg.balance(acct, day):>9}  "
                        f"available {lg.available(acct, day):>9}  holds {lg.active_holds(acct)}")
         out.append("  auths: " + ", ".join(f"{a}={lg.auth_state(a)}" for a in AUTHS if lg.auth_state(a) != "UNKNOWN"))
-        errs = [e for e in lg.events if e.day == day and e.outcome in ("REJECTED", "DECLINED")]
+        errs = [e for e in lg.events if e.day == day and e.outcome in ("REJECTED", "DECLINED", "DUPLICATE")]
         out.append("  errors: " + ("; ".join(f"{e.event} {e.outcome}: {e.detail}" for e in errs) or "none"))
         reports[day] = out
 
