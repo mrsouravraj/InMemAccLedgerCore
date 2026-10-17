@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Ledger Core</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="docs/arch.css" />
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Ledger Core: Architecture and Trade-offs</h1>
+</header>
+<p><strong>Design in one line.</strong> Two append-only lists (an event
+log with outcomes, and a journal of frozen entries) are the only stored
+state. Balances, available balance, authorization state and active fees
+are derived by folding over them. The ledger has no clock and no
+I/O.</p>
+<h2 id="append-only-at-scale">1. Append-only at scale</h2>
+<p><strong>What breaks first at 100× volume.</strong> Not memory, but
+the cost of derivation. Every read is a scan of the whole journal:
+<code>balance(account, day)</code> is O(N). The end-of-day fee check
+calls it for every account and every day since the start of history, so
+one close costs roughly accounts × days × N. At today’s size that is
+nothing. At 100× volume and a year of history the nightly close grows
+with the <em>square</em> of history length, and it is the first thing to
+miss its batch window. <code>auth_state</code>, <code>reverse</code> and
+<code>fee_active</code> are further linear scans.</p>
+<p><strong>Where state grows without bound.</strong></p>
+<ul>
+<li>The journal and event log grow forever (correct for audit, but they
+live in one process list).</li>
+<li>The re-check window grows forever: every close revisits day 1.</li>
+<li>Rejected and declined events are kept, so noisy inputs (retries,
+declined card attempts) grow the event log faster than the journal.</li>
+</ul>
+<p><strong>Cheapest structural change that defers it.</strong> Two small
+changes, no new storage engine:</p>
+<ol type="1">
+<li><strong>Index and bucket per account.</strong> Keep
+<code>journal_by_account</code> and a running sum per
+<code>(account, value_day)</code>. The balance for day <em>d</em>
+becomes a prefix sum over at most <em>d</em> buckets instead of N
+entries. Index auths by id, entries by event label.</li>
+<li><strong>A dirty-day watermark.</strong> Record the earliest
+<code>value_day</code> touched since the last close. The fee re-check
+starts there instead of day 1. A normal day touches only today, so the
+close is O(1) per account; a back-valued entry touches just the days
+from its value date forward, which is exactly the set of balances it can
+change.</li>
+</ol>
+<p>Because history is append-only, a bucket is never edited, only
+extended, so these indexes are safe caches that can be rebuilt from the
+journal at any time. The next step after that is partitioning by account
+(accounts share no state in this design, so it needs no cross-partition
+coordination), then checkpointing a period-end balance per account so
+old journal segments can move to cold storage without being read by the
+nightly run.</p>
+<h2 id="value-dated-entries-in-a-uae-licensed-bank">2. Value-dated
+entries in a UAE-licensed bank</h2>
+<p>A value date separates <em>when the bank learned of something</em>
+from <em>when it takes financial effect</em>. That makes a booked past
+period mutable in effect, even though no record is edited. The surface
+this creates:</p>
+<ul>
+<li><strong>Customer-facing.</strong> A closed day’s balance has already
+appeared on a statement or in a mobile app. A back-valued entry changes
+what that day <em>should have</em> shown, which can trigger fees or
+interest the customer did not see at the time. Under the CBUAE
+consumer-protection framework, charges that arise from the bank’s own
+correction need to be explainable, and often refundable, which is why my
+model reverses consequential fees by compensating entries rather than
+keeping them.</li>
+<li><strong>Interest and profit.</strong> Back-valuing forces
+recalculation from the value date forward. For Islamic windows or
+accounts the same mechanics apply to <em>profit</em> accrual and need
+Sharia-board-approved treatment before any recalculation is
+applied.</li>
+<li><strong>Regulatory reporting.</strong> Returns and ratios built from
+closing balances (liquidity, reserve requirements, large-exposure and
+other CBUAE submissions) are computed as at a date. If a back-valued
+entry lands after submission, the bank either restates (with governance,
+and possibly resubmission) or books the effect in the current period.
+Both need a defined policy, not a code path someone discovers at quarter
+end.</li>
+<li><strong>Finance and audit.</strong> Accounting periods close. A
+value date inside a closed period must not silently change posted
+general-ledger balances; the difference has to be booked as a
+prior-period adjustment or in the current period with an explicit
+reconciling line.</li>
+<li><strong>Payments calendar.</strong> UAE business days (Monday–Friday
+weekend handling, public holidays, and Hijri-calendar-driven holiday
+dates that move each year), UAEFTS and instant-payment cut-offs, and
+salary-payment (WPS) value dates all determine what a <em>valid</em>
+value date even is.</li>
+<li><strong>AML and record-keeping.</strong> Screening and
+transaction-monitoring run on booking time, while reports to the
+regulator (suspicious activity, cross-border) refer to economic date.
+Both timestamps must be kept immutable and retrievable for the retention
+period required by the AML rules (confirm the exact period with
+compliance).</li>
+</ul>
+<p><strong>One control I would add before go-live: a back-value
+gate.</strong> Any entry whose value date is earlier than the current
+open business day is held until (a) the system has computed and shown an
+<em>impact preview</em>: every affected day’s recalculated balance, the
+fees and interest it would create or remove, and any reporting period it
+touches; (b) a second person (maker-checker) approves it; and (c) a
+configurable look-back limit has been respected, with anything older
+than the limit or inside a closed accounting period needing a named
+controller. This control sits where the damage starts: it turns a silent
+restatement into a reviewed decision, and its output is the evidence an
+auditor will ask for.</p>
+<h2 id="authorization-lifecycle">3. Authorization lifecycle</h2>
+<p>In the model as built, an authorization is <code>DECLINED</code> on
+arrival, <code>APPROVED</code> (a hold exists), or <code>SETTLED</code>
+(settlement posted and the whole hold released). A duplicate id is
+rejected. <strong>An approved authorization has no other exit. It stays
+active forever.</strong> That is the main gap, and the list below is
+what production must add, with the behaviour I would mandate.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>End of life</th>
+<th>Real-world scenario</th>
+<th>Mandated behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Declined at creation</td>
+<td>Not enough available balance, account frozen, limit hit</td>
+<td>No hold, outcome recorded with the reason and the balance used.
+Already built.</td>
+</tr>
+<tr>
+<td>Expiry</td>
+<td>Merchant never presents the item (cancelled order, forgotten
+pre-auth). Hold lifetimes vary by merchant category and scheme</td>
+<td>A timer posts a <code>HOLD_RELEASE</code> by system event, with a
+distinct reason. A late settlement afterwards is treated as unmatched,
+not silently accepted.</td>
+</tr>
+<tr>
+<td>Merchant reversal / void</td>
+<td>Customer cancels before clearing; full or partial reversal
+message</td>
+<td>Full: release the hold. Partial: reduce the hold to the remaining
+amount. Both are new entries, never edits.</td>
+</tr>
+<tr>
+<td>Issuer or customer cancel</td>
+<td>Card blocked for fraud, customer disputes the pre-auth</td>
+<td>Release or retain by policy, but the decision must be an explicit
+entry with the actor and reason.</td>
+</tr>
+<tr>
+<td>Account event</td>
+<td>Account closed, frozen by court order, customer deceased</td>
+<td>Holds are not auto-released. They convert to a legal or operational
+block, owned by a named team.</td>
+</tr>
+<tr>
+<td>Partial or split settlement</td>
+<td>Under-settlement (tips, fuel), multiple shipments clearing
+separately</td>
+<td>Define the rule: close on first clearing (as built) or allow
+multiple clearings until the hold is consumed or expires.
+Over-settlement needs a tolerance by merchant category.</td>
+</tr>
+<tr>
+<td>Unmatched settlement</td>
+<td>Clearing with no authorization (offline, stand-in, force-post)</td>
+<td>The issuer may already owe the scheme. Route to an exception queue
+with an owner and an SLA, rather than dropping it, and decide whether it
+posts to the customer or a suspense account.</td>
+</tr>
+<tr>
+<td>Invalidated by a back-valued entry</td>
+<td>A back-valued debit makes an earlier approval look wrong in
+hindsight</td>
+<td>Do <strong>not</strong> revoke it: the commitment to the scheme was
+made on information that was true then. Flag it, report it, and let the
+fee and decline rules react going forward.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-i-cut-and-the-risk-each-defers">4. What I cut, and the risk
+each defers</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Simplification</th>
+<th>Production risk deferred</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-sided ledger (customer sub-ledger, no double entry, no
+general ledger)</td>
+<td>No trial balance or control total; customer balances cannot be
+proven against the GL. Unbalanced postings go unnoticed.</td>
+</tr>
+<tr>
+<td>No idempotency keys or ordering guarantee on input</td>
+<td>A redelivered message posts twice. Duplicate-id checks exist only
+for authorizations.</td>
+</tr>
+<tr>
+<td>No persistence, crash recovery or concurrency control</td>
+<td>Lost state on restart. Two writers would race on balance checks
+(authorize-then-debit).</td>
+</tr>
+<tr>
+<td>O(N) reads, no indexes (Section 1)</td>
+<td>Nightly close misses its window at volume.</td>
+</tr>
+<tr>
+<td>“Day” is an integer; no business calendar or time zone</td>
+<td>Weekends, holidays and cut-off times, and so which value dates are
+valid, are not modelled.</td>
+</tr>
+<tr>
+<td>No back-value limit or approval (Section 2)</td>
+<td>Any past day can be rewritten without review or period-close
+protection.</td>
+</tr>
+<tr>
+<td>Hold expiry, void, multi-clearing and over-settlement tolerance
+absent (Section 3)</td>
+<td>Customer funds stay blocked indefinitely; disputes cannot be
+represented.</td>
+</tr>
+<tr>
+<td>Fee only in AED; flat 25.00; no cap, waiver, or agreed overdraft
+facility</td>
+<td>Every negative balance is treated as unarranged. No product tiers or
+customer-protection caps on charges.</td>
+</tr>
+<tr>
+<td>One interest rate, one rounding rule, one capitalization, no
+day-count basis</td>
+<td>No tiered rates, no profit-rate rules for Islamic products, no
+accrual basis (e.g. actual/365) for the regulator or customer
+disclosures.</td>
+</tr>
+<tr>
+<td>Only credits and debits can be reversed; no reversal of fees,
+settlements or interest as primary events</td>
+<td>Complex corrections need manual workarounds outside the model.</td>
+</tr>
+<tr>
+<td>No identity on entries (who/why) and no maker-checker</td>
+<td>No segregation of duties. Weak audit story for a regulated
+bank.</td>
+</tr>
+<tr>
+<td>Restated reports are printed, not issued</td>
+<td>No customer notification, statement re-issue or regulatory
+resubmission workflow.</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>

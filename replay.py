@@ -1,5 +1,5 @@
 """Replays the event stream in the stated order and prints, per day: closing ledger balance,
-fee assessments, authorization states and errors. Owns the clock; ledger.py owns the rules."""
+fee entries, authorization states and errors. Owns the clock; ledger.py owns the rules."""
 from decimal import Decimal
 
 from ledger import Ledger, WINDOW
