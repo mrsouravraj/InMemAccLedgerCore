@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 docs/arch.html
 .DS_Store
+.venv/
