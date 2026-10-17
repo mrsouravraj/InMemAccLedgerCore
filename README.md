@@ -45,5 +45,12 @@ ACC-002 (BHD): 3.333 + 3.333 + 3.334 = 10.000 on Day 5. Interest 0.004 + 0.004 =
 | `REJECTED.md` | Criteria refused with reasons, plus approaches dropped |
 | `WORKLOG.md` | Timestamped record of the build |
 | `ARCHITECTURE.md` / `.pdf` | Architecture and trade-offs document (3 pages) |
+| `docs/arch.css` | Print stylesheet used to render the PDF |
 
-Regenerate the PDF: `pandoc ARCHITECTURE.md -s --metadata pagetitle="Ledger Core" -c docs/arch.css -o docs/arch.html`, then print `docs/arch.html` to PDF with a headless browser (`--no-pdf-header-footer`).
+Regenerate the PDF (`docs/arch.html` is a generated intermediate and is gitignored; `docs/arch.css` is hand-written source and stays tracked):
+
+```bash
+pandoc ARCHITECTURE.md -s --metadata pagetitle="Ledger Core" -c docs/arch.css -o docs/arch.html
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu \
+  --no-pdf-header-footer --print-to-pdf=ARCHITECTURE.pdf "file://$PWD/docs/arch.html"
+```
