@@ -16,10 +16,10 @@ python3 -m unittest tests.test_known_failure        # the annotated failing test
 For each `=== DAY n close ===` block:
 
 - **Event lines** `E3 AUTHORIZATION ACC-001 ACCEPTED …`: every input event processed that day with its outcome (`ACCEPTED` / `REJECTED` / `DECLINED` / `DUPLICATE`) and the numbers behind the decision. A `LATE_ARRIVAL` line marks an event declared on an earlier day but processed today.
-- **`EODn FEE` / `FEE_REVERSAL` / `INTEREST` lines**: postings the system made at that close. The `value Day d` column is the day the posting counts for, which can be earlier than the day shown.
+- **`EODn FEE` / `FEE_REVERSAL` / `INTEREST` lines**: postings the system made at that close. The `value Day d` column is the day the posting counts for, which can be earlier than the day shown. On Day 6 a `CAPITALIZATION` line per account marks the end of that account's window: later input for it is rejected.
 - **`ledger` / `available` / `holds`**: closing balance (entries with value date ≤ that day, as known at that close), balance minus active holds, and total active holds.
 - **`auths`**: state of each authorization (`APPROVED`, `DECLINED`, `SETTLED`).
-- **`errors`**: rejected and declined events of the day, with reasons.
+- **`errors`**: rejected, declined and duplicate events of the day, with reasons. Invalid input (non-positive or non-numeric amounts, days outside 1..6, future value dates) is rejected here, never posted.
 
 After the daily blocks:
 

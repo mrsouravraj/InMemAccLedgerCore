@@ -60,6 +60,7 @@ In the model as built, an authorization is `DECLINED` on arrival, `APPROVED` (a 
 | Hold expiry, void, multi-clearing and over-settlement tolerance absent (Section 3) | Customer funds stay blocked indefinitely; disputes cannot be represented. |
 | Fee only in AED; flat 25.00; no cap, waiver, or agreed overdraft facility | Every negative balance is treated as unarranged. No product tiers or customer-protection caps on charges. |
 | One interest rate, one rounding rule, one capitalization, no day-count basis | No tiered rates, no profit-rate rules for Islamic products, no accrual basis (e.g. actual/365) for the regulator or customer disclosures. |
+| Window closes at capitalization, with no post-capitalization adjustment path | A genuine late correction after Day 6 is rejected outright; production needs an explicit adjustment workflow with its own approval. |
 | Only credits and debits can be reversed; no reversal of fees, settlements or interest as primary events | Complex corrections need manual workarounds outside the model. |
 | No identity on entries (who/why) and no maker-checker | No segregation of duties. Weak audit story for a regulated bank. |
 | Restated reports are printed, not issued | No customer notification, statement re-issue or regulatory resubmission workflow. |
