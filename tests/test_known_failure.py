@@ -18,18 +18,18 @@ Kept failing on purpose; do not "fix" the test.
 import unittest
 from decimal import Decimal
 
-from replay import run, WINDOW, ACCOUNTS
+from replay import run
 
 
 class AvailableNeverNegative(unittest.TestCase):
     def test_available_is_never_negative_at_any_day_close(self):
-        lg, reports = run()
+        lg, _ = run()
         for d in range(1, 6):
-            # Re-derive Day d's close the way it was printed: entries booked on or before Day d, value_date <= d.
-            bal = sum((e.amount for e in lg.journal if e.account == "ACC-001"
-                       and e.kind not in ("HOLD", "HOLD_RELEASE") and e.value_day <= d and e.booked_day <= d),
-                      Decimal(0))
-            self.assertGreaterEqual(bal, 0, f"ACC-001 Day {d} close is {bal}")   # fails on Day 5: -230.00
+            # Day d close as it was printed: entries booked on or before Day d. available = ledger (value_date <= d) - active holds.
+            seen = [e for e in lg.journal if e.account == "ACC-001" and e.booked_day <= d]
+            ledger = sum((e.amount for e in seen if e.kind not in ("HOLD", "HOLD_RELEASE") and e.value_day <= d), Decimal(0))
+            holds = sum((e.amount if e.kind == "HOLD" else -e.amount for e in seen if e.kind in ("HOLD", "HOLD_RELEASE")), Decimal(0))
+            self.assertGreaterEqual(ledger - holds, 0, f"ACC-001 Day {d} available is {ledger - holds}")   # fails on Day 5: -230.00
 
 
 if __name__ == "__main__":

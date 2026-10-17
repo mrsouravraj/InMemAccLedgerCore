@@ -27,9 +27,8 @@
   <link rel="stylesheet" href="docs/arch.css" />
 </head>
 <body>
-<header id="title-block-header">
-<h1 class="title">Ledger Core: Architecture and Trade-offs</h1>
-</header>
+<h1 id="ledger-core-architecture-and-trade-offs">Ledger Core:
+Architecture and Trade-offs</h1>
 <p><strong>Design in one line.</strong> Two append-only lists (an event
 log with outcomes, and a journal of frozen entries) are the only stored
 state. Balances, available balance, authorization state and active fees
@@ -108,10 +107,10 @@ general-ledger balances; the difference has to be booked as a
 prior-period adjustment or in the current period with an explicit
 reconciling line.</li>
 <li><strong>Payments calendar.</strong> UAE business days (Monday–Friday
-weekend handling, public holidays, and Hijri-calendar-driven holiday
-dates that move each year), UAEFTS and instant-payment cut-offs, and
-salary-payment (WPS) value dates all determine what a <em>valid</em>
-value date even is.</li>
+work week, Saturday–Sunday weekend since 2022, public holidays, and
+Hijri-calendar holiday dates that move each year), UAEFTS and
+instant-payment cut-offs, and salary-payment (WPS) value dates all
+determine what a <em>valid</em> value date even is.</li>
 <li><strong>AML and record-keeping.</strong> Screening and
 transaction-monitoring run on booking time, while reports to the
 regulator (suspicious activity, cross-border) refer to economic date.

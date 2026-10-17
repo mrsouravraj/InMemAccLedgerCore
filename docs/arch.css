@@ -1,6 +1,6 @@
 @page { size: A4; margin: 16mm 16mm 16mm 16mm; }
 body { font: 9.5pt/1.38 -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1a1a1a; max-width: none; }
-h1.title { font-size: 17pt; margin: 0 0 6pt; }
+h1 { font-size: 17pt; margin: 0 0 6pt; }
 h2 { font-size: 12pt; margin: 12pt 0 4pt; border-bottom: 1px solid #bbb; padding-bottom: 2pt; }
 p, li { margin: 3pt 0; }
 ul, ol { margin: 3pt 0 3pt 14pt; padding: 0; }

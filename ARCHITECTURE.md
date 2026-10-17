@@ -1,6 +1,4 @@
----
-title: "Ledger Core: Architecture and Trade-offs"
----
+# Ledger Core: Architecture and Trade-offs
 
 **Design in one line.** Two append-only lists (an event log with outcomes, and a journal of frozen entries) are the only stored state. Balances, available balance, authorization state and active fees are derived by folding over them. The ledger has no clock and no I/O.
 
@@ -29,7 +27,7 @@ A value date separates *when the bank learned of something* from *when it takes 
 - **Interest and profit.** Back-valuing forces recalculation from the value date forward. For Islamic windows or accounts the same mechanics apply to *profit* accrual and need Sharia-board-approved treatment before any recalculation is applied.
 - **Regulatory reporting.** Returns and ratios built from closing balances (liquidity, reserve requirements, large-exposure and other CBUAE submissions) are computed as at a date. If a back-valued entry lands after submission, the bank either restates (with governance, and possibly resubmission) or books the effect in the current period. Both need a defined policy, not a code path someone discovers at quarter end.
 - **Finance and audit.** Accounting periods close. A value date inside a closed period must not silently change posted general-ledger balances; the difference has to be booked as a prior-period adjustment or in the current period with an explicit reconciling line.
-- **Payments calendar.** UAE business days (Monday–Friday weekend handling, public holidays, and Hijri-calendar-driven holiday dates that move each year), UAEFTS and instant-payment cut-offs, and salary-payment (WPS) value dates all determine what a *valid* value date even is.
+- **Payments calendar.** UAE business days (Monday–Friday work week, Saturday–Sunday weekend since 2022, public holidays, and Hijri-calendar holiday dates that move each year), UAEFTS and instant-payment cut-offs, and salary-payment (WPS) value dates all determine what a *valid* value date even is.
 - **AML and record-keeping.** Screening and transaction-monitoring run on booking time, while reports to the regulator (suspicious activity, cross-border) refer to economic date. Both timestamps must be kept immutable and retrievable for the retention period required by the AML rules (confirm the exact period with compliance).
 
 **One control I would add before go-live: a back-value gate.** Any entry whose value date is earlier than the current open business day is held until (a) the system has computed and shown an *impact preview*: every affected day's recalculated balance, the fees and interest it would create or remove, and any reporting period it touches; (b) a second person (maker-checker) approves it; and (c) a configurable look-back limit has been respected, with anything older than the limit or inside a closed accounting period needing a named controller. This control sits where the damage starts: it turns a silent restatement into a reviewed decision, and its output is the evidence an auditor will ask for.
